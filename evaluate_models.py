@@ -18,9 +18,11 @@ from ollama import Client
 OLLAMA_HOST = "http://10.67.75.157:11434"
 JUDGE_MODEL = "gpt-oss:20b"
 
+CALLS_DIR = Path("calls")
 FORMS_DIR = Path("forms")
 GENERATED_FORMS_DIR = Path("generated_forms")
-EVAL_REPORTS_DIR = Path("eval_reports")
+
+EVAL_REPORTS_DIR = Path("eval_reports_v2")
 PER_SAMPLE_DIR = EVAL_REPORTS_DIR / "per_sample"
 
 # 若只想測部分 sample，可填 ["001", "002"]
@@ -38,39 +40,74 @@ PRINT_JUDGE_RAW = False
 # =========================
 
 EVAL_PROMPT_TEMPLATE = """
-你是一位保險公司內部審核人員，請比較「模型生成會辦單」與「原始會辦單」的差異。
+你是一位保險公司內部審核人員，現在要評估「模型生成會辦單」在此任務上的品質。
 
-【評估目標】
-請根據以下標準進行評估，並提供精確、簡短的評論。
+你會看到三份資料：
+1. 通話紀錄：最主要的事實依據
+2. 原始會辦單：人工撰寫版本，但不一定完整或完美，只能作為輔助參考
+3. 模型生成會辦單：待評估對象
 
-【評估項目】
-1. 個資擷取正確性（姓名、電話、身分證、生日、地址、保單號碼）
-2. 主問題理解（是否抓到客戶真正需求）
-3. 條列式會辦單品質（是否清楚、精簡、可用）
-4. 幻覺（是否出現原始內容未提及的資訊）
+【重要原則】
+- 請優先根據「通話紀錄」判斷模型生成內容是否正確
+- 「原始會辦單」只能作為輔助參考，不可視為唯一正確答案
+- 若模型內容忠於通話、且資訊合理，即使與原始會辦單不同，也不應直接判低分
+- 若模型補出通話中未提及的資訊，應視為 hallucination
+- 評論要精確、簡短、可比較
+
+【評估面向】
+1. faithfulness_to_call
+   - 模型內容是否忠於通話內容
+   - 是否根據通話正確整理，而非自行補寫
+
+2. personal_info_extraction
+   - 是否正確擷取通話中出現的個資
+   - 包括姓名、電話、身分證、生日、地址、保單號碼
+   - 若通話未提及某項個資，不要求模型補出
+
+3. main_issue_understanding
+   - 是否抓到客戶真正需求與主問題
+
+4. bullet_form_usability
+   - 條列式會辦單是否清楚、精簡、可供內部承辦使用
+
+5. hallucination_control
+   - 是否避免加入通話未提及的內容
+   - score 定義：
+     - 1.0 = 幾乎沒有幻覺
+     - 0.0 = 幻覺很多
+
+6. similarity_to_original_form
+   - 與原始會辦單在寫法、精簡程度、實務風格上的接近度
+   - 這項是輔助維度，不可凌駕於通話忠實度之上
 
 【評分規則】
-- score 範圍只能是 0 到 1
+- 每個 score 範圍只能是 0 到 1
 - 可使用小數，例如 0.0, 0.5, 0.8, 1.0
-- hallucination 的 score 定義如下：
-  - 1.0 = 幾乎沒有幻覺
-  - 0.0 = 幻覺很多
+- 若資訊不足，也要根據可見內容給分
 
 【輸出格式（JSON）】
 {
-  "personal_info_accuracy": {
+  "faithfulness_to_call": {
     "score": 0.0,
     "comment": ""
   },
-  "main_issue_accuracy": {
+  "personal_info_extraction": {
     "score": 0.0,
     "comment": ""
   },
-  "bullet_quality": {
+  "main_issue_understanding": {
     "score": 0.0,
     "comment": ""
   },
-  "hallucination": {
+  "bullet_form_usability": {
+    "score": 0.0,
+    "comment": ""
+  },
+  "hallucination_control": {
+    "score": 0.0,
+    "comment": ""
+  },
+  "similarity_to_original_form": {
     "score": 0.0,
     "comment": ""
   },
@@ -82,12 +119,14 @@ EVAL_PROMPT_TEMPLATE = """
 - overall_comment 不可超過 30 字
 - 不可解釋評估過程
 - 不可輸出 JSON 以外內容
-- 若資訊不足，也要根據可見內容給分
 
-【原始會辦單】
+【通話紀錄】
+{call_text}
+
+【原始會辦單（輔助參考）】
 {reference_form}
 
-【模型生成會辦單】
+【模型生成會辦單（待評估）】
 {generated_form}
 """.strip()
 
@@ -116,9 +155,10 @@ def load_text(path: Path) -> str:
     return path.read_text(encoding="utf-8").strip()
 
 
-def build_eval_prompt(reference_form: str, generated_form: str) -> str:
+def build_eval_prompt(call_text: str, reference_form: str, generated_form: str) -> str:
     return (
         EVAL_PROMPT_TEMPLATE
+        .replace("{call_text}", call_text)
         .replace("{reference_form}", reference_form)
         .replace("{generated_form}", generated_form)
     )
@@ -160,31 +200,34 @@ def clamp_score(value: Any) -> float | None:
     return round(num, 4)
 
 
+def normalize_item(parsed: dict[str, Any], key: str) -> dict[str, Any]:
+    item = parsed.get(key, {})
+    if not isinstance(item, dict):
+        item = {}
+
+    score = clamp_score(item.get("score"))
+    comment = item.get("comment")
+    if comment is None:
+        comment = ""
+    comment = str(comment).strip()
+
+    return {
+        "score": score,
+        "comment": comment,
+    }
+
+
 def normalize_eval_result(parsed: dict[str, Any] | None) -> dict[str, Any] | None:
     if not isinstance(parsed, dict):
         return None
 
-    def normalize_item(key: str) -> dict[str, Any]:
-        item = parsed.get(key, {})
-        if not isinstance(item, dict):
-            item = {}
-
-        score = clamp_score(item.get("score"))
-        comment = item.get("comment")
-        if comment is None:
-            comment = ""
-        comment = str(comment).strip()
-
-        return {
-            "score": score,
-            "comment": comment,
-        }
-
     normalized = {
-        "personal_info_accuracy": normalize_item("personal_info_accuracy"),
-        "main_issue_accuracy": normalize_item("main_issue_accuracy"),
-        "bullet_quality": normalize_item("bullet_quality"),
-        "hallucination": normalize_item("hallucination"),
+        "faithfulness_to_call": normalize_item(parsed, "faithfulness_to_call"),
+        "personal_info_extraction": normalize_item(parsed, "personal_info_extraction"),
+        "main_issue_understanding": normalize_item(parsed, "main_issue_understanding"),
+        "bullet_form_usability": normalize_item(parsed, "bullet_form_usability"),
+        "hallucination_control": normalize_item(parsed, "hallucination_control"),
+        "similarity_to_original_form": normalize_item(parsed, "similarity_to_original_form"),
         "overall_comment": str(parsed.get("overall_comment", "")).strip(),
     }
     return normalized
@@ -224,7 +267,12 @@ def get_sample_ids(forms_dir: Path) -> list[str]:
     return ids
 
 
-def save_per_sample_result(result: EvalResult) -> None:
+def save_per_sample_result(
+    result: EvalResult,
+    call_text: str,
+    reference_form: str,
+    generated_form: str,
+) -> None:
     out_dir = PER_SAMPLE_DIR / result.model_dir
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -237,6 +285,11 @@ def save_per_sample_result(result: EvalResult) -> None:
             "elapsed_seconds": result.elapsed_seconds,
             "parse_success": result.parse_success,
             "error": result.error,
+        },
+        "inputs": {
+            "call_text": call_text,
+            "reference_form": reference_form,
+            "generated_form": generated_form,
         },
         "parsed_output": result.parsed_output,
         "raw_output": result.raw_output,
@@ -254,6 +307,15 @@ def compute_summary(all_results: list[EvalResult]) -> dict[str, Any]:
 
     summary: dict[str, Any] = {}
 
+    metric_keys = [
+        "faithfulness_to_call",
+        "personal_info_extraction",
+        "main_issue_understanding",
+        "bullet_form_usability",
+        "hallucination_control",
+        "similarity_to_original_form",
+    ]
+
     for model_dir, results in grouped.items():
         total = len(results)
         parse_success_count = sum(1 for r in results if r.parse_success)
@@ -266,22 +328,35 @@ def compute_summary(all_results: list[EvalResult]) -> dict[str, Any]:
                     continue
                 item = r.parsed_output.get(metric_key, {})
                 score = item.get("score")
-                if isinstance(score, (float, int)):
+                if isinstance(score, (int, float)):
                     scores.append(float(score))
             if not scores:
                 return None
             return round(sum(scores) / len(scores), 4)
 
-        summary[model_dir] = {
+        item = {
             "total_samples": total,
             "parse_success_count": parse_success_count,
             "parse_success_rate": round(parse_success_count / total, 4) if total else 0.0,
             "avg_elapsed_seconds": round(avg_elapsed, 4),
-            "avg_personal_info_accuracy": collect_avg("personal_info_accuracy"),
-            "avg_main_issue_accuracy": collect_avg("main_issue_accuracy"),
-            "avg_bullet_quality": collect_avg("bullet_quality"),
-            "avg_hallucination": collect_avg("hallucination"),
         }
+
+        for key in metric_keys:
+            item[f"avg_{key}"] = collect_avg(key)
+
+        # 可選：做一個簡單總平均，但要知道它只是摘要，不是唯一指標
+        usable_scores = [
+            item.get("avg_faithfulness_to_call"),
+            item.get("avg_personal_info_extraction"),
+            item.get("avg_main_issue_understanding"),
+            item.get("avg_bullet_form_usability"),
+            item.get("avg_hallucination_control"),
+            item.get("avg_similarity_to_original_form"),
+        ]
+        usable_scores = [s for s in usable_scores if isinstance(s, (int, float))]
+        item["avg_overall_score"] = round(sum(usable_scores) / len(usable_scores), 4) if usable_scores else None
+
+        summary[model_dir] = item
 
     return summary
 
@@ -305,10 +380,13 @@ def write_summary_csv(summary: dict[str, Any]) -> None:
         "parse_success_count",
         "parse_success_rate",
         "avg_elapsed_seconds",
-        "avg_personal_info_accuracy",
-        "avg_main_issue_accuracy",
-        "avg_bullet_quality",
-        "avg_hallucination",
+        "avg_faithfulness_to_call",
+        "avg_personal_info_extraction",
+        "avg_main_issue_understanding",
+        "avg_bullet_form_usability",
+        "avg_hallucination_control",
+        "avg_similarity_to_original_form",
+        "avg_overall_score",
     ]
 
     with path.open("w", encoding="utf-8-sig", newline="") as f:
@@ -322,6 +400,8 @@ def write_summary_csv(summary: dict[str, Any]) -> None:
 
 
 def validate_paths() -> None:
+    if not CALLS_DIR.exists():
+        raise FileNotFoundError(f"找不到資料夾：{CALLS_DIR}")
     if not FORMS_DIR.exists():
         raise FileNotFoundError(f"找不到資料夾：{FORMS_DIR}")
     if not GENERATED_FORMS_DIR.exists():
@@ -359,17 +439,29 @@ def main() -> None:
 
     for model_dir in model_dirs:
         for sample_id in sample_ids:
+            call_path = CALLS_DIR / f"{sample_id}.txt"
             ref_path = FORMS_DIR / f"{sample_id}.txt"
             gen_path = model_dir / f"{sample_id}.txt"
+
+            if not call_path.exists():
+                if PRINT_PROGRESS:
+                    print(f"[WARN] 缺少通話檔案：{call_path}")
+                continue
 
             if not gen_path.exists():
                 if PRINT_PROGRESS:
                     print(f"[WARN] 缺少生成檔案：{gen_path}")
                 continue
 
+            call_text = load_text(call_path)
             reference_form = load_text(ref_path)
             generated_form = load_text(gen_path)
-            prompt = build_eval_prompt(reference_form, generated_form)
+
+            prompt = build_eval_prompt(
+                call_text=call_text,
+                reference_form=reference_form,
+                generated_form=generated_form,
+            )
 
             if PRINT_PROGRESS:
                 print(f"[INFO] evaluating sample={sample_id}, model_dir={model_dir.name}")
@@ -408,7 +500,12 @@ def main() -> None:
                     error=f"{type(exc).__name__}: {exc}",
                 )
 
-            save_per_sample_result(result)
+            save_per_sample_result(
+                result=result,
+                call_text=call_text,
+                reference_form=reference_form,
+                generated_form=generated_form,
+            )
             all_results.append(result)
 
     summary = compute_summary(all_results)
