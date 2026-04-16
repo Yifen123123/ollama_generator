@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import random
-import re
 import time
 from dataclasses import dataclass, asdict
 from pathlib import Path
@@ -18,12 +17,19 @@ from ollama import Client
 OLLAMA_HOST = "http://10.67.75.157:11434"
 GEN_MODEL = "gpt-oss:20b"
 
+# 這裡是真實通話資料夾
+REAL_CALLS_DIR = Path("calls")
+
 OUTPUT_BASE_DIR = Path("synthetic_data")
 CALLS_DIR = OUTPUT_BASE_DIR / "synthetic_calls"
 LABELS_DIR = OUTPUT_BASE_DIR / "synthetic_labels"
 
 NUM_SAMPLES = 20
 START_INDEX = 1
+
+# 每次生成前，從 calls/ 抽幾筆真實通話當風格範例
+NUM_FEWSHOT_EXAMPLES = 3
+MAX_EXAMPLE_CHARS_PER_CALL = 1200
 
 PRINT_PROGRESS = True
 PRINT_RAW_OUTPUT = False
@@ -39,13 +45,23 @@ random.seed(RANDOM_SEED)
 PROMPT_TEMPLATE = """
 你是一位保險客服語音轉文字資料模擬助手。
 
-請根據以下條件，生成一段「像 STT 語音轉文字結果」的客服通話內容。
+以下提供一些真實客服通話的 STT 逐字轉寫風格範例，請先觀察它們的特徵：
+- 句子很碎
+- 有停頓、語助詞
+- 同一段資訊可能分多行說完
+- 客服會重複確認客戶剛提供的內容
+- 看起來像語音轉文字，不像人工整理稿
+
+【真實通話風格範例】
+{fewshot_examples}
+
+請根據上面範例的風格，生成一段新的保險客服通話內容。
 
 【任務要求】
 - 輸出客戶（R）與客服（L）的對話
 - 對話需符合保險客服情境
 - 必須包含指定資訊與流程
-- 對話要像真實電話逐字轉寫，而不是整理過的對話稿
+- 對話需模仿 STT 語音轉文字風格，而不是整理過的劇本
 
 【STT 風格規則】
 1. 句子要短，允許被切成很多行
@@ -60,8 +76,11 @@ PROMPT_TEMPLATE = """
    L: 0945
    R: 678901
    L: 678901
-8. 對話需有真實客服互動感，不可像劇本摘要
-9. 長度控制在 18 到 36 句之間
+8. 若客戶提供電話、生日、證號末碼、保單號碼末碼等資訊，請優先拆成多輪短句與確認句
+9. 對話需有真實客服互動感，不可像摘要
+10. 請避免每句都完整、正式、書面化
+11. 請讓至少 30% 的對話行是短句或斷裂句
+12. 對話長度控制在 18 到 36 句之間
 
 【重要規則】
 1. 只能根據提供條件生成，不可新增未被允許的具體事實
@@ -72,7 +91,7 @@ PROMPT_TEMPLATE = """
    L: 客服
    R: 客戶
 6. 不要加入旁白、說明、分析或標題
-7. 請讓內容看起來像 STT 逐字轉寫，不要像人工整理稿
+7. 請直接輸出對話內容，不要解釋
 
 【條件】
 客戶目的：
@@ -92,6 +111,9 @@ PROMPT_TEMPLATE = """
 
 客戶語氣：
 {customer_tone}
+
+STT斷句風格：
+{stt_style}
 
 【輸出】
 直接輸出對話內容
@@ -146,6 +168,7 @@ SERVICE_FLOW_LIBRARY = {
 
 DIFFICULTIES = ["簡單", "中等", "偏複雜"]
 CUSTOMER_TONES = ["平靜", "急切", "有點困惑", "簡短直接"]
+STT_STYLES = ["輕微斷句", "中度斷句", "明顯斷句"]
 
 
 @dataclass
@@ -157,21 +180,68 @@ class Scenario:
     service_flow: list[str]
     difficulty: str
     customer_tone: str
+    stt_style: str
 
 
 # =========================
 # 工具函式
 # =========================
 
-def build_prompt(s: Scenario) -> str:
+def load_text(path: Path) -> str:
+    return path.read_text(encoding="utf-8").strip()
+
+
+def truncate_text(text: str, max_chars: int) -> str:
+    text = text.strip()
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars].rstrip() + "\n...(以下省略)"
+
+
+def sample_real_calls(
+    calls_dir: Path,
+    n: int = 3,
+    max_chars_per_call: int = 1200,
+) -> list[dict[str, str]]:
+    if not calls_dir.exists():
+        raise FileNotFoundError(f"找不到真實通話資料夾：{calls_dir}")
+
+    files = sorted(calls_dir.glob("*.txt"))
+    if not files:
+        raise FileNotFoundError(f"{calls_dir} 中沒有 .txt 檔案")
+
+    sampled = random.sample(files, min(n, len(files)))
+
+    examples: list[dict[str, str]] = []
+    for file_path in sampled:
+        content = load_text(file_path)
+        examples.append({
+            "filename": file_path.name,
+            "content": truncate_text(content, max_chars=max_chars_per_call),
+        })
+
+    return examples
+
+
+def format_fewshot_examples(examples: list[dict[str, str]]) -> str:
+    blocks = []
+    for idx, ex in enumerate(examples, start=1):
+        block = f"【範例{idx}｜{ex['filename']}】\n{ex['content']}"
+        blocks.append(block)
+    return "\n\n".join(blocks)
+
+
+def build_prompt(s: Scenario, fewshot_examples_text: str) -> str:
     return (
         PROMPT_TEMPLATE
+        .replace("{fewshot_examples}", fewshot_examples_text)
         .replace("{customer_intent}", s.customer_intent)
         .replace("{required_info}", "、".join(s.required_info) if s.required_info else "無")
         .replace("{optional_info}", "、".join(s.optional_info) if s.optional_info else "無")
         .replace("{service_flow}", " → ".join(s.service_flow))
         .replace("{difficulty}", s.difficulty)
         .replace("{customer_tone}", s.customer_tone)
+        .replace("{stt_style}", s.stt_style)
     )
 
 
@@ -185,17 +255,20 @@ def generate_scenarios(num_samples: int, start_index: int = 1) -> list[Scenario]
         service_flow = SERVICE_FLOW_LIBRARY[intent]
         difficulty = random.choice(DIFFICULTIES)
         customer_tone = random.choice(CUSTOMER_TONES)
+        stt_style = random.choice(STT_STYLES)
 
-        scenario = Scenario(
-            scenario_id=f"{i:03d}",
-            customer_intent=intent,
-            required_info=required_info,
-            optional_info=optional_info,
-            service_flow=service_flow,
-            difficulty=difficulty,
-            customer_tone=customer_tone,
+        scenarios.append(
+            Scenario(
+                scenario_id=f"{i:03d}",
+                customer_intent=intent,
+                required_info=required_info,
+                optional_info=optional_info,
+                service_flow=service_flow,
+                difficulty=difficulty,
+                customer_tone=customer_tone,
+                stt_style=stt_style,
+            )
         )
-        scenarios.append(scenario)
 
     return scenarios
 
@@ -206,12 +279,23 @@ def validate_dialogue(text: str) -> tuple[bool, str]:
         return False, "empty output"
 
     lines = [line.strip() for line in text.splitlines() if line.strip()]
-    if len(lines) < 4:
+    if len(lines) < 12:
         return False, "too few lines"
 
     bad_prefix = [line for line in lines if not (line.startswith("L:") or line.startswith("R:"))]
     if bad_prefix:
         return False, "invalid speaker prefix"
+
+    filler_words = ["痾", "嗯", "嗯嗯", "啊", "喔", "對", "好", "那個", "就是"]
+    filler_count = sum(any(word in line for word in filler_words) for line in lines)
+
+    short_line_count = sum(len(line.replace("L:", "").replace("R:", "").strip()) <= 8 for line in lines)
+
+    if filler_count < 2:
+        return False, "not enough filler words"
+
+    if short_line_count < 4:
+        return False, "not enough short segmented lines"
 
     return True, ""
 
@@ -235,6 +319,7 @@ def save_outputs(
     dialogue_text: str,
     elapsed_seconds: float,
     error: str | None,
+    fewshot_examples: list[dict[str, str]],
 ) -> None:
     CALLS_DIR.mkdir(parents=True, exist_ok=True)
     LABELS_DIR.mkdir(parents=True, exist_ok=True)
@@ -252,11 +337,15 @@ def save_outputs(
             "error": error,
         },
         "scenario": asdict(scenario),
+        "fewshot_examples": fewshot_examples,
         "target_summary": {
             "customer_intent": scenario.customer_intent,
             "required_info": scenario.required_info,
             "optional_info": scenario.optional_info,
             "service_flow": scenario.service_flow,
+            "difficulty": scenario.difficulty,
+            "customer_tone": scenario.customer_tone,
+            "stt_style": scenario.stt_style,
         },
         "dialogue_file": str(call_path),
     }
@@ -283,18 +372,31 @@ def main() -> None:
     client = Client(host=OLLAMA_HOST)
     OUTPUT_BASE_DIR.mkdir(parents=True, exist_ok=True)
 
+    # 先從真實通話資料夾 calls/ 抽幾筆風格範例
+    fewshot_examples = sample_real_calls(
+        calls_dir=REAL_CALLS_DIR,
+        n=NUM_FEWSHOT_EXAMPLES,
+        max_chars_per_call=MAX_EXAMPLE_CHARS_PER_CALL,
+    )
+    fewshot_examples_text = format_fewshot_examples(fewshot_examples)
+
     scenarios = generate_scenarios(num_samples=NUM_SAMPLES, start_index=START_INDEX)
     generation_results: list[dict[str, Any]] = []
 
     if PRINT_PROGRESS:
         print(f"[INFO] model={GEN_MODEL}")
         print(f"[INFO] num_samples={len(scenarios)}")
+        print(f"[INFO] fewshot_examples={[ex['filename'] for ex in fewshot_examples]}")
 
     for scenario in scenarios:
-        prompt = build_prompt(scenario)
+        prompt = build_prompt(scenario, fewshot_examples_text)
 
         if PRINT_PROGRESS:
-            print(f"[INFO] generating scenario={scenario.scenario_id} | intent={scenario.customer_intent}")
+            print(
+                f"[INFO] generating scenario={scenario.scenario_id} "
+                f"| intent={scenario.customer_intent} "
+                f"| stt_style={scenario.stt_style}"
+            )
 
         try:
             output, elapsed = call_model(client, prompt)
@@ -312,6 +414,7 @@ def main() -> None:
                 dialogue_text=output,
                 elapsed_seconds=elapsed,
                 error=error,
+                fewshot_examples=fewshot_examples,
             )
 
             generation_results.append({
@@ -330,6 +433,7 @@ def main() -> None:
                 dialogue_text="",
                 elapsed_seconds=0.0,
                 error=error,
+                fewshot_examples=fewshot_examples,
             )
 
             generation_results.append({
