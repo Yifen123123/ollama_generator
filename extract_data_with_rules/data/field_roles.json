@@ -1,0 +1,152 @@
+{
+  "客戶姓名": {
+    "primary_role": "call_observable",
+    "may_appear_in_call": true,
+    "may_come_from_system": false,
+    "comparison_mode": "entity"
+  },
+  "聯絡電話": {
+    "primary_role": "call_observable",
+    "may_appear_in_call": true,
+    "may_come_from_system": true,
+    "comparison_mode": "entity"
+  },
+  "地址": {
+    "primary_role": "system_enriched",
+    "may_appear_in_call": true,
+    "may_come_from_system": true,
+    "comparison_mode": "entity"
+  },
+  "保單號碼": {
+    "primary_role": "system_enriched",
+    "may_appear_in_call": true,
+    "may_come_from_system": true,
+    "comparison_mode": "entity"
+  },
+  "要保人姓名": {
+    "primary_role": "system_enriched",
+    "may_appear_in_call": true,
+    "may_come_from_system": true,
+    "comparison_mode": "entity"
+  },
+  "要保人身分證字號": {
+    "primary_role": "system_enriched",
+    "may_appear_in_call": true,
+    "may_come_from_system": true,
+    "comparison_mode": "entity"
+  },
+  "保單狀態": {
+    "primary_role": "system_enriched",
+    "may_appear_in_call": true,
+    "may_come_from_system": true,
+    "comparison_mode": "entity"
+  },
+  "保單類型": {
+    "primary_role": "system_enriched",
+    "may_appear_in_call": true,
+    "may_come_from_system": true,
+    "comparison_mode": "entity"
+  },
+  "保費金額": {
+    "primary_role": "system_enriched",
+    "may_appear_in_call": true,
+    "may_come_from_system": true,
+    "comparison_mode": "entity"
+  },
+  "繳費頻率": {
+    "primary_role": "system_enriched",
+    "may_appear_in_call": true,
+    "may_come_from_system": true,
+    "comparison_mode": "entity"
+  },
+  "問題描述": {
+    "primary_role": "summary_or_rewritten",
+    "may_appear_in_call": true,
+    "may_come_from_system": false,
+    "comparison_mode": "summary"
+  },
+  "申請事項": {
+    "primary_role": "summary_or_rewritten",
+    "may_appear_in_call": true,
+    "may_come_from_system": false,
+    "comparison_mode": "summary"
+  },
+  "後續追蹤需求": {
+    "primary_role": "summary_or_rewritten",
+    "may_appear_in_call": true,
+    "may_come_from_system": false,
+    "comparison_mode": "summary"
+  },
+  "出生日期": {
+    "primary_role": "system_enriched",
+    "may_appear_in_call": true,
+    "may_come_from_system": true,
+    "comparison_mode": "entity"
+  },
+  "身分證字號": {
+    "primary_role": "system_enriched",
+    "may_appear_in_call": true,
+    "may_come_from_system": true,
+    "comparison_mode": "entity"
+  },
+  "電子郵件": {
+    "primary_role": "call_observable",
+    "may_appear_in_call": true,
+    "may_come_from_system": true,
+    "comparison_mode": "entity"
+  },
+  "受益人": {
+    "primary_role": "system_enriched",
+    "may_appear_in_call": true,
+    "may_come_from_system": true,
+    "comparison_mode": "entity"
+  },
+  "借款狀態": {
+    "primary_role": "system_enriched",
+    "may_appear_in_call": true,
+    "may_come_from_system": true,
+    "comparison_mode": "entity"
+  },
+  "解約原因": {
+    "primary_role": "summary_or_rewritten",
+    "may_appear_in_call": true,
+    "may_come_from_system": false,
+    "comparison_mode": "summary"
+  },
+  "申請原因": {
+    "primary_role": "summary_or_rewritten",
+    "may_appear_in_call": true,
+    "may_come_from_system": false,
+    "comparison_mode": "summary"
+  },
+  "申請類型": {
+    "primary_role": "summary_or_rewritten",
+    "may_appear_in_call": true,
+    "may_come_from_system": false,
+    "comparison_mode": "summary"
+  },
+  "需採取之行動": {
+    "primary_role": "summary_or_rewritten",
+    "may_appear_in_call": true,
+    "may_come_from_system": true,
+    "comparison_mode": "summary"
+  },
+  "處理狀態": {
+    "primary_role": "summary_or_rewritten",
+    "may_appear_in_call": true,
+    "may_come_from_system": true,
+    "comparison_mode": "summary"
+  },
+  "日期": {
+    "primary_role": "call_observable",
+    "may_appear_in_call": true,
+    "may_come_from_system": true,
+    "comparison_mode": "entity"
+  },
+  "時間": {
+    "primary_role": "call_observable",
+    "may_appear_in_call": true,
+    "may_come_from_system": false,
+    "comparison_mode": "entity"
+  }
+}
